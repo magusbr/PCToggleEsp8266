@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PC Toggle</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" type="text/css" href="style.css">
+  
+</head>
+<body onload="onLoadEvent()">
+  <h1>PC Toggle</h1>
+  <p>PC state:</p>
+  <div id="led-red" hidden><div class="led-red" style="margin-bottom: 5px"></div>Off</div>
+  <div id="led-blue" hidden><div class="led-blue" style="margin-bottom: 5px"></div>On</div>
+  <div id="led-error" hidden></div>
+  
+  <p><a href="/togglepc"><button class="button">On / Off</button></a></p>
+  <script>
+	var ws;
+
+	function setOn() {
+		document.getElementById('led-red').style.display = 'none';
+		document.getElementById('led-blue').style.display = 'block';
+		document.getElementById('led-error').style.display = 'none';
+	}
+	
+	function setOff() {
+		document.getElementById('led-red').style.display = 'block';
+		document.getElementById('led-blue').style.display = 'none';
+		document.getElementById('led-error').style.display = 'none';
+	}
+	
+	function setError(error) {
+		document.getElementById('led-red').style.display = 'none';
+		document.getElementById('led-blue').style.display = 'none';
+		document.getElementById('led-error').style.display = 'block';
+		document.getElementById('led-error').innerHTML = 'Error: ' + error;
+	}
+
+    function httpGet(theUrl)
+	{
+		const url = "/getstatus";
+		fetch(theUrl)
+			.then((response) => {
+				if (response.status == 201) {
+					setOn();
+				} else if (response.status == 204) {
+					setOff();
+				} else {
+					setError(response.status);
+				}
+			})
+			.catch((err) => {
+				setError(err);
+			});
+	}
+
+	function timer() {
+		response = httpGet('/getstatus');
+	};
+
+	function connectWs() {
+		ws = new WebSocket('ws://' + location.hostname + '/ws');
+		ws.onmessage = function(data) {
+			updateResponse(data.data);
+		}
+		ws.onclose = function(e) {
+			setTimeout(function() {
+			  connectWs();
+			}, 1000);
+		}
+		ws.onerror = function(err) {
+			ws.close();
+		}
+	}
+	
+	function updateResponse(message) {
+		if (message === "ON")
+			setOn();
+		else if (message === "OFF")
+			setOff();
+		else
+			setError('websocket failed');
+	}
+
+	function onLoadEvent() {
+		//timer();
+		//window.setInterval(timer, 3000);
+		connectWs();
+	}
+	
+	%STATE%
+  </script>
+</body>
+</html>
