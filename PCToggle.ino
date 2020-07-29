@@ -14,7 +14,7 @@ String dnsFingerprint = ""; // certificate freedns.afraid.org
 
 // Set LED GPIO
 const int ledPin = 4; //d2
-const int ledInput = 5; //d1
+const int ledInput = 13; //d7
 // Stores LED state
 String ledInputState;
 
