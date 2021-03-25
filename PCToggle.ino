@@ -4,9 +4,18 @@
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <FS.h>
+#include <AddrList.h>
 #include <LittleFS.h>
 
+// IPv6 support based on:
+// https://github.com/me-no-dev/AsyncTCP/pull/105/commits/0dc3b996a47ac63b3583667330103d8e0e6d5bb2
+
+// To support IPv6:
+// - Set Tools/lwIP variant to "v2 IPv6 Lower Memory"
+// - Copy ESPAsyncTCP to libraries folder of your Arduino
+
 // Replace with your network credentials
+#define DNS_IPV6_KEY ""
 const char* ssid = "";
 const char* password = "";
 String dnsKey = ""; // key to update dyndns
@@ -18,15 +27,13 @@ const int ledInput = 13; //d7
 // Stores LED state
 String ledInputState;
 
-// Create AsyncWebServer object on port 80
-AsyncWebServer server(80);
+// Create AsyncWebServer object
+AsyncWebServer server(5443);
 AsyncWebSocket ws("/ws"); // access at ws://[esp ip]/ws
 
-IPAddress ip(192, 168, 0, 5);
-IPAddress gateway(192, 168, 0, 1);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress dns(8, 8, 8, 8);
-IPAddress dns2(8, 8, 4, 4);
+#define FQDN  F("www.google.com")  // with both IPv4 & IPv6 addresses
+#define FQDN2 F("www.yahoo.com")   // with both IPv4 & IPv6 addresses
+#define FQDN6 F("ipv6.google.com") // does not resolve in IPv4
 
 const long intervalDns = 10 * 60 * 1000; // milliseconds
 unsigned long previousDns = 0;
@@ -47,11 +54,82 @@ String processor(const String& var) {
   return String();
 }
 
+void fqdn(Print& out, const String& fqdn) {
+  Serial.print(F("resolving "));
+  Serial.print(fqdn);
+  Serial.print(F(": "));
+  IPAddress result;
+  if (WiFi.hostByName(fqdn.c_str(), result)) {
+    result.printTo(out);
+    Serial.println();
+  } else {
+    Serial.println(F("timeout or not found"));
+  }
+}
+
+#if LWIP_IPV4 && LWIP_IPV6
+void fqdn_rt(Print& out, const String& fqdn, DNSResolveType resolveType) {
+  Serial.print(F("resolving "));
+  Serial.print(fqdn);
+  Serial.print(F(": "));
+  IPAddress result;
+  if (WiFi.hostByName(fqdn.c_str(), result, 10000, resolveType)) {
+    result.printTo(out);
+    Serial.println();
+  } else {
+    Serial.println(F("timeout or not found"));
+  }
+}
+#endif
+
+void status(Print& out) {
+  Serial.println(F("------------------------------"));
+  Serial.println(ESP.getFullVersion());
+
+  for (int i = 0; i < DNS_MAX_SERVERS; i++) {
+    IPAddress dns = WiFi.dnsIP(i);
+    if (dns.isSet()) {
+      Serial.printf("dns%d: %s\n", i, dns.toString().c_str());
+    }
+  }
+
+  Serial.println(F("My addresses:"));
+  for (auto a : addrList) {
+    Serial.printf("IF='%s' IPv6=%d local=%d hostname='%s' addr= %s",
+               a.ifname().c_str(),
+               a.isV6(),
+               a.isLocal(),
+               a.ifhostname(),
+               a.toString().c_str());
+
+    if (a.isLegacy()) {
+      Serial.printf(" / mask:%s / gw:%s",
+                 a.netmask().toString().c_str(),
+                 a.gw().toString().c_str());
+    }
+
+    Serial.println();
+
+  }
+
+  // lwIP's dns client will ask for IPv4 first (by default)
+  // an example is provided with a fqdn which does not resolve with IPv4
+  fqdn(out, FQDN);
+  fqdn(out, FQDN6);
+#if LWIP_IPV4 && LWIP_IPV6
+  fqdn_rt(out, FQDN,  DNSResolveType::DNS_AddrType_IPv4_IPv6); // IPv4 before IPv6
+  fqdn_rt(out, FQDN2, DNSResolveType::DNS_AddrType_IPv6_IPv4); // IPv6 before IPv4
+#endif
+  Serial.println(F("------------------------------"));
+}
+
 void setup() {
   // Serial port for debugging purposes
   Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
   pinMode(ledInput, INPUT_PULLUP);
+
+  delay(2000);
 
   // Initialize LittleFS
   if (!LittleFS.begin()) {
@@ -60,12 +138,21 @@ void setup() {
   }
 
   // Connect to Wi-Fi
-  WiFi.config(ip, gateway, subnet, dns, dns2);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting to WiFi..");
+
+  status(Serial);
+
+  for (bool configured = false; !configured;) {
+    for (auto addr : addrList)
+      if ((configured = !addr.isLocal()
+                        // && addr.isV6() // uncomment when IPv6 is mandatory
+                        // && addr.ifnumber() == STATION_IF
+          )) {
+        break;
+      }
+    Serial.print('.');
+    delay(500);
   }
 
   // Print ESP32 Local IP Address
@@ -106,7 +193,7 @@ void loop() {
     Serial.println("reset dns - begin");
     HTTPClient http;
     http.setTimeout(2000);
-    if (http.begin("https://freedns.afraid.org/dynamic/update.php?" + dnsKey, dnsFingerprint)) {
+    if (http.begin("http://v6.sync.afraid.org/u/" DNS_IPV6_KEY)) {
       int httpCode = http.GET();
       if (httpCode > 0) {
         Serial.print("dns http code: ");
