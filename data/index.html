@@ -69,7 +69,7 @@
 	};
 
 	function connectWs() {
-		ws = new WebSocket('ws://' + location.hostname + '/ws');
+		ws = new WebSocket('ws://' + location.hostname + ':' + location.port + '/ws');
 		ws.onmessage = function(data) {
 			updateResponse(data.data);
 		}
