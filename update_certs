@@ -1,0 +1,1 @@
+python cert.py -s ydns.eu -n ydns > certs.h

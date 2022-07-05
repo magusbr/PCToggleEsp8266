@@ -6,6 +6,8 @@
 #include <FS.h>
 #include <AddrList.h>
 #include <LittleFS.h>
+#include <ArduinoJson.h>
+#include "certs.h"
 
 // IPv6 support based on:
 // https://github.com/me-no-dev/AsyncTCP/pull/105/commits/0dc3b996a47ac63b3583667330103d8e0e6d5bb2
@@ -14,12 +16,14 @@
 // - Set Tools/lwIP variant to "v2 IPv6 Lower Memory"
 // - Copy ESPAsyncTCP to libraries folder of your Arduino
 
-// Replace with your network credentials
-#define DNS_IPV6_KEY ""
-const char* ssid = "";
-const char* password = "";
-String dnsKey = ""; // key to update dyndns
-String dnsFingerprint = ""; // certificate freedns.afraid.org
+// Retrieved from JSON cfg file (max 2024)
+/*
+{"wifi_ssid":"","wifi_password":"","afraid_org_key":"","ydns_eu_path":""}
+ */
+char afraid_org[128] = {0};
+char ssid[32] = {0};
+char password[32] = {0};
+char ydns_path[64] = {0};
 
 // Set LED GPIO
 const int ledPin = 4; //d2
@@ -137,6 +141,8 @@ void setup() {
     return;
   }
 
+  load_cfg();
+
   // Connect to Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -174,10 +180,13 @@ void setup() {
   });
 
   server.on("/getstatus", HTTP_GET, [](AsyncWebServerRequest * request) {
-    if (!digitalRead(ledInput))
+    if (!digitalRead(ledInput)) {
+      //Serial.println("led on");
       request->send(201, "text/plain", "ON");
-    else
+    } else {
       request->send(204, "text/plain", "OFF");
+      //Serial.println("led off");
+    }
   });
 
   // attach AsyncWebSocket
@@ -187,36 +196,161 @@ void setup() {
   server.begin();
 }
 
+void setClock() {
+  configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  Serial.print("Waiting for NTP time sync: ");
+  time_t now = time(nullptr);
+  while (now < 8 * 3600 * 2) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+  Serial.println("");
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  Serial.print("Current time: ");
+  Serial.print(asctime(&timeinfo));
+}
+
+void fetchURL(BearSSL::WiFiClientSecure *client, const char *host, const uint16_t port, const char *path) {
+  if (!path) { path = "/"; }
+
+  ESP.resetFreeContStack();
+  uint32_t freeStackStart = ESP.getFreeContStack();
+  Serial.printf("Trying: %s:443...", host);
+
+//  IPAddress result;
+//  if (WiFi.hostByName(host, result, 10000, DNSResolveType::DNS_AddrType_IPv6)) {
+//    Serial.printf("Solved ipv6\n");
+//    Serial.printf("ip %s\n", result.toString().c_str());
+//  }
+//  char pom[1024];
+//  sprintf(pom, "[%s]", result.toString().c_str());
+//  Serial.printf("%s\n", pom);
+//  client->connect(host, port);
+
+  // it connects but only as a ipv4 - need to investigate why it doesn't connect as ipv6 even using ip
+
+  client->connect(host, port);
+  if (!client->connected()) {
+    Serial.printf("*** Can't connect. ***\n-------\n");
+    return;
+  }
+  Serial.printf("Connected!\n-------\n");
+  client->write("GET ");
+  client->write(path);
+  client->write(" HTTP/1.0\r\nHost: ");
+  client->write(host);
+  client->write("\r\nUser-Agent: ESP8266\r\n");
+  client->write("\r\n");
+  uint32_t to = millis() + 5000;
+  if (client->connected()) {
+    do {
+      char tmp[32];
+      memset(tmp, 0, 32);
+      int rlen = client->read((uint8_t *)tmp, sizeof(tmp) - 1);
+      yield();
+      if (rlen < 0) { break; }
+//      // Only print out first line up to \r, then abort connection
+//      char *nl = strchr(tmp, '\r');
+//      if (nl) {
+//        *nl = 0;
+//        Serial.print(tmp);
+//        break;
+//      }
+      Serial.print(tmp);
+    } while (millis() < to);
+  }
+  client->stop();
+  uint32_t freeStackEnd = ESP.getFreeContStack();
+  Serial.printf("\nCONT stack used: %d\n", freeStackStart - freeStackEnd);
+  Serial.printf("BSSL stack used: %d\n-------\n\n", stack_thunk_get_max_usage());
+}
+
+void https_connect() {
+  BearSSL::WiFiClientSecure client;
+  BearSSL::X509List cert(cert_ISRG_Root_X1);
+  client.setTrustAnchors(&cert);
+  setClock();
+  fetchURL(&client, "ydns.io", 443, ydns_path);
+}
+
+void load_cfg() {
+  char buffer[2048+1] = {0};
+  
+  File f = LittleFS.open("/secrets.json", "r");
+  if (f) {
+    f.readBytes(buffer, 2048);
+    //Serial.printf("[%s]\n", buffer);
+
+    f.close();
+  } else {
+    return;
+  }
+  
+  DynamicJsonDocument doc(2048);
+  DeserializationError error = deserializeJson(doc, buffer);
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return;
+  }
+
+  Serial.printf("ssid = [%s]\n", (const char*)doc["wifi_ssid"]);
+  Serial.printf("afraid_org = [%s]\n", (const char*)doc["afraid_org_key"]);
+  Serial.printf("ydns_path = [%s]\n", (const char*)doc["ydns_eu_path"]);
+  
+  strcpy(ssid, (const char*)doc["wifi_ssid"]);
+  strcpy(password, (const char*)doc["wifi_password"]);
+  sprintf(afraid_org, "http://v6.sync.afraid.org/u/%s", (const char*)doc["afraid_org_key"]);
+  strcpy(ydns_path, (const char*)doc["ydns_eu_path"]);
+}
+
 void loop() {
   unsigned long currentDns = millis();
   if ((currentDns - previousDns >= intervalDns) || (previousDns == 0)) {
+    //https_connect();
     Serial.println("reset dns - begin");
-    HTTPClient http;
-    http.setTimeout(2000);
-    if (http.begin("http://v6.sync.afraid.org/u/" DNS_IPV6_KEY)) {
-      int httpCode = http.GET();
-      if (httpCode > 0) {
-        Serial.print("dns http code: ");
-        Serial.println(httpCode);
-        String payload = http.getString();
-        Serial.println(payload);
+
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFiClient client;
+      HTTPClient http;
+      http.setTimeout(2000);
+      
+      if (http.begin(client, afraid_org)) {
+        int httpCode = http.GET();
+        if (httpCode > 0) {
+          Serial.print("dns http code: ");
+          Serial.println(httpCode);
+          String payload = http.getString();
+          Serial.println(payload);
+        } else {
+          Serial.print("error: ");
+          Serial.println(httpCode);
+          Serial.println(http.errorToString(httpCode).c_str());
+        }
+        http.end();
       } else {
-        Serial.println(http.errorToString(httpCode).c_str());
+        Serial.println("connect error");
       }
-      http.end();
     } else {
-      Serial.println("connect error");
+      Serial.println("WiFi disconnected");
     }
+
     previousDns = currentDns;
     Serial.println("reset dns - end");
   }
 
   unsigned long currentStatus = millis();
   if ((currentStatus - previousStatus >= intervalStatus) || (previousDns == 0)) {
-    if (!digitalRead(ledInput))
+    if (!digitalRead(ledInput)) {
+      //Serial.println("led on");
       ws.textAll("ON");
-    else
+    } else {
       ws.textAll("OFF");
+      //Serial.println("led off");
+    }
     previousStatus = currentStatus;
   }
 
