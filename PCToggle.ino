@@ -18,12 +18,13 @@
 
 // Retrieved from JSON cfg file (max 2024)
 /*
-{"wifi_ssid":"","wifi_password":"","afraid_org_key":"","ydns_eu_path":""}
+{"wifi_ssid":"","wifi_password":"","afraid_org_key":"","ydns_eu_path":"","ydns_eu_auth":""}
  */
 char afraid_org[128] = {0};
 char ssid[32] = {0};
 char password[32] = {0};
 char ydns_path[64] = {0};
+char ydns_auth[128] = {0};
 
 // Set LED GPIO
 const int ledPin = 4; //d2
@@ -105,7 +106,9 @@ void status(Print& out) {
                a.isLocal(),
                a.ifhostname(),
                a.toString().c_str());
-
+    strcat(ydns_path, a.toString().c_str());
+    Serial.printf("full path = [%s]\n", ydns_path);
+  
     if (a.isLegacy()) {
       Serial.printf(" / mask:%s / gw:%s",
                  a.netmask().toString().c_str(),
@@ -242,6 +245,7 @@ void fetchURL(BearSSL::WiFiClientSecure *client, const char *host, const uint16_
   client->write(path);
   client->write(" HTTP/1.0\r\nHost: ");
   client->write(host);
+  client->write(ydns_auth);
   client->write("\r\nUser-Agent: ESP8266\r\n");
   client->write("\r\n");
   uint32_t to = millis() + 5000;
@@ -305,6 +309,7 @@ void load_cfg() {
   strcpy(password, (const char*)doc["wifi_password"]);
   sprintf(afraid_org, "http://v6.sync.afraid.org/u/%s", (const char*)doc["afraid_org_key"]);
   strcpy(ydns_path, (const char*)doc["ydns_eu_path"]);
+  strcpy(ydns_auth, (const char*)doc["ydns_eu_auth"]);
 }
 
 void loop() {
