@@ -26,6 +26,7 @@ char password[32] = {0};
 char ydns_path[64] = {0};
 char ydns_auth[128] = {0};
 
+bool first = true;
 // Set LED GPIO
 const int ledPin = 4; //d2
 const int ledInput = 13; //d7
@@ -315,7 +316,10 @@ void load_cfg() {
 void loop() {
   unsigned long currentDns = millis();
   if ((currentDns - previousDns >= intervalDns) || (previousDns == 0)) {
-    //https_connect();
+    if (first) {
+      https_connect();
+      first = false;
+    }
     Serial.println("reset dns - begin");
 
     if (WiFi.status() == WL_CONNECTED) {
