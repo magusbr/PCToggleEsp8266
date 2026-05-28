@@ -1,4 +1,5 @@
 // Import required libraries
+#include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ESPAsyncTCP.h>
@@ -6,7 +7,6 @@
 #include <FS.h>
 #include <AddrList.h>
 #include <LittleFS.h>
-#include <ArduinoJson.h>
 #include "certs.h"
 
 // IPv6 support based on:
@@ -18,13 +18,15 @@
 
 // Retrieved from JSON cfg file (max 2024)
 /*
-{"wifi_ssid":"","wifi_password":"","afraid_org_key":"","ydns_eu_path":"","ydns_eu_auth":""}
+{"wifi_bssid":"", "wifi_ssid":"","wifi_password":"","afraid_org_key":"","ydns_eu_path":"","ydns_eu_auth":""}
  */
+bool bssid_present = false;
 char afraid_org[128] = {0};
 char ssid[32] = {0};
 char password[32] = {0};
 char ydns_path[64] = {0};
 char ydns_auth[128] = {0};
+uint8_t bssid[6] = {0};
 
 bool first = true;
 // Set LED GPIO
@@ -107,8 +109,15 @@ void status(Print& out) {
                a.isLocal(),
                a.ifhostname(),
                a.toString().c_str());
-    strcat(ydns_path, a.toString().c_str());
-    Serial.printf("full path = [%s]\n", ydns_path);
+    if (a.isV6() && !a.isLocal() && a.toString() != "::1") {
+      char firstChar = a.toString().charAt(0);
+      // GLOBAL IP FILTER: only ips started with '2' or '3' (GUA)
+      // This will eliminate addresses started with 'f' (Link-Local and ULA)
+      if (firstChar == '2' || firstChar == '3') {
+        strcat(ydns_path, a.toString().c_str());
+        Serial.printf("\nfull path = [%s]", ydns_path);
+      }
+    }
   
     if (a.isLegacy()) {
       Serial.printf(" / mask:%s / gw:%s",
@@ -131,6 +140,48 @@ void status(Print& out) {
   Serial.println(F("------------------------------"));
 }
 
+void connectToWifi() {
+  if (bssid_present) {
+    // bssid was provided - start direct connection
+    Serial.println("\n--- Starting Direct Connection via DHCP ---");
+
+    // Clean past tries
+    WiFi.persistent(false);
+    WiFi.disconnect(true);
+    delay(1000);
+    
+    WiFi.mode(WIFI_STA);
+
+    // Direct connects to the target preventing scanning
+    WiFi.begin(ssid, password, 0, bssid);
+
+    Serial.println("Requesting IP via DHCP");
+
+    int tentativas = 0;
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(250); 
+      Serial.print(".");
+
+      tentativas++;
+      if (tentativas > 80) { // If it spends more than 20s, try again
+        Serial.println("\nRepetindo solicitação DHCP...");
+        Serial.println(ssid);
+        Serial.println(password);
+        WiFi.begin(ssid, password, 0, bssid);
+        tentativas = 0;
+      }
+    }
+
+    Serial.println("\nSuccessfuly connected via DHCP!");
+    Serial.print("DHCP IP: ");
+    Serial.println(WiFi.localIP()); 
+  } else {
+    // Connect to Wi-Fi
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+  }
+}
+
 void setup() {
   // Serial port for debugging purposes
   Serial.begin(115200);
@@ -148,8 +199,7 @@ void setup() {
   load_cfg();
 
   // Connect to Wi-Fi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  connectToWifi();
 
   status(Serial);
 
@@ -294,7 +344,7 @@ void load_cfg() {
     return;
   }
   
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, buffer);
   if (error) {
     Serial.print(F("deserializeJson() failed: "));
@@ -306,14 +356,39 @@ void load_cfg() {
   Serial.printf("afraid_org = [%s]\n", (const char*)doc["afraid_org_key"]);
   Serial.printf("ydns_path = [%s]\n", (const char*)doc["ydns_eu_path"]);
   
-  strcpy(ssid, (const char*)doc["wifi_ssid"]);
-  strcpy(password, (const char*)doc["wifi_password"]);
+  JsonArray arrayNode = doc["wifi_bssid"].as<JsonArray>();
+  // max 6 bytes
+  int size = arrayNode.size() <= 6 ? arrayNode.size() : 6;
+  if (size == 0) {
+    bssid_present = false;
+  } else {
+    // bssid provided - need to extract data
+    bssid_present = true;
+    for (int i = 0; i < size; i++) {
+      // Get the text hex value (ex: "0x10")
+      const char* hexStr = arrayNode[i]; 
+
+      if (hexStr != nullptr) {
+        // strtol converts the base 16 text ignoring "0x"
+        bssid[i] = (byte)strtol(hexStr, NULL, 16); 
+        
+        // Prints the hexadecimal value
+        Serial.print("Index [");
+        Serial.print(i);
+        Serial.print("] -> 0x");
+        Serial.println(bssid[i], HEX);
+      }
+    }
+  }
+  strlcpy(ssid, (const char*)doc["wifi_ssid"], sizeof(ssid));
+  strlcpy(password, (const char*)doc["wifi_password"], sizeof(password));
   sprintf(afraid_org, "http://v6.sync.afraid.org/u/%s", (const char*)doc["afraid_org_key"]);
-  strcpy(ydns_path, (const char*)doc["ydns_eu_path"]);
-  strcpy(ydns_auth, (const char*)doc["ydns_eu_auth"]);
+  strlcpy(ydns_path, (const char*)doc["ydns_eu_path"], sizeof(ydns_path));
+  strlcpy(ydns_auth, (const char*)doc["ydns_eu_auth"], sizeof(ydns_auth));
 }
 
 void loop() {
+  unsigned long ledPinTimer = 0;
   unsigned long currentDns = millis();
   if ((currentDns - previousDns >= intervalDns) || (previousDns == 0)) {
     if (first) {
@@ -327,6 +402,7 @@ void loop() {
       HTTPClient http;
       http.setTimeout(2000);
       
+      Serial.println(afraid_org);
       if (http.begin(client, afraid_org)) {
         int httpCode = http.GET();
         if (httpCode > 0) {
@@ -365,11 +441,17 @@ void loop() {
 
   if (togglepc == 1) {
     togglepc = 0;
-    Serial.print("TOGGLE PC CALLED");
+    Serial.print("TOGGLE PC CALLED: ");
     Serial.print(ledPin);
-    digitalWrite(ledPin, HIGH);   // Turn the LED on by making the voltage LOW
-    delay(200);                      // Milliseconds
-    digitalWrite(ledPin, LOW);  // Turn the LED off by making the voltage HIGH
-    Serial.println(" - end");
+    // Turn the LED on by making the voltage LOW
+    digitalWrite(ledPin, HIGH);
+    ledPinTimer = millis(); // start timer
+  }
+
+  if (ledPinTimer > 0 && (millis() - ledPinTimer >= 200)) {
+    // Turn the LED off after approximately 200ms
+    digitalWrite(ledPin, LOW);
+    ledPinTimer = 0; // Desativa o timer
+    Serial.println(" - END");
   }
 }
