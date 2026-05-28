@@ -388,7 +388,6 @@ void load_cfg() {
 }
 
 void loop() {
-  unsigned long ledPinTimer = 0;
   unsigned long currentDns = millis();
   if ((currentDns - previousDns >= intervalDns) || (previousDns == 0)) {
     if (first) {
@@ -443,15 +442,9 @@ void loop() {
     togglepc = 0;
     Serial.print("TOGGLE PC CALLED: ");
     Serial.print(ledPin);
-    // Turn the LED on by making the voltage LOW
-    digitalWrite(ledPin, HIGH);
-    ledPinTimer = millis(); // start timer
-  }
-
-  if (ledPinTimer > 0 && (millis() - ledPinTimer >= 200)) {
-    // Turn the LED off after approximately 200ms
-    digitalWrite(ledPin, LOW);
-    ledPinTimer = 0; // Desativa o timer
-    Serial.println(" - END");
+    digitalWrite(ledPin, HIGH);   // Turn the LED on by making the voltage LOW
+    delay(200);                      // Milliseconds
+    digitalWrite(ledPin, LOW);  // Turn the LED off by making the voltage HIGH
+    Serial.println(" - end");
   }
 }
